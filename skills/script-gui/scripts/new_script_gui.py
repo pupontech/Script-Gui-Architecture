@@ -9,10 +9,11 @@ creates is Windows-only by nature (PowerShell 5.1 + WPF).
      [--id my-tool] [--admin] [--launcher Run-MyToolGui.bat] [--force] [--dry-run]
 
 Existing files are never overwritten unless --force is given. Text files are written as pure
-ASCII; .bat files get CRLF line ends, everything else is copied byte for byte apart from the
-placeholders.
+ASCII. Batch files get CRLF line endings. The catalog is serialized as JSON, and placeholders
+in other text files are substituted.
 """
 import argparse
+import json
 import os
 import re
 import sys
@@ -34,8 +35,8 @@ def main() -> int:
     args = ap.parse_args()
 
     title = args.title.strip()
-    if not title or any(ord(c) > 127 for c in title):
-        print("ERROR: --title must be plain ASCII text (PowerShell 5.1 house rule).", file=sys.stderr)
+    if not title or any(not 32 <= ord(c) <= 126 for c in title):
+        print("ERROR: --title must be printable ASCII text (PowerShell 5.1 house rule).", file=sys.stderr)
         return 2
     if any(c in title for c in '"%!^&|<>'):
         print('ERROR: --title must not contain " % ! ^ & | < > (it is written into a .bat file).', file=sys.stderr)
@@ -55,6 +56,7 @@ def main() -> int:
         "__NEED_ADMIN__": "1" if args.admin else "0",
         "__LAUNCHER_NAME__": launcher,
     }
+    tokens = re.compile("|".join(re.escape(key) for key in repl))
     target = os.path.abspath(args.target)
     planned = []
     for root, _dirs, files in os.walk(TEMPLATE):
@@ -72,25 +74,38 @@ def main() -> int:
             print("  " + rel, file=sys.stderr)
         return 1
 
-    for src, dst, rel in planned:
-        with open(src, "rb") as f:
-            data = f.read()
-        ext = os.path.splitext(src)[1].lower()
-        if ext in TEXT_EXT:
-            text = data.decode("ascii")
-            for key, value in repl.items():
-                text = text.replace(key, value)
-            if ext == ".json" and args.admin:
-                text = text.replace('"RequireAdmin": false', '"RequireAdmin": true')
-            if ext == ".bat":
-                text = text.replace("\r\n", "\n").replace("\n", "\r\n")
-            data = text.encode("ascii")
-        print(("would write " if args.dry_run else "wrote ") + rel)
+    rendered = []
+    try:
+        for src, dst, rel in planned:
+            with open(src, "rb") as f:
+                data = f.read()
+            if rel == os.path.join("gui", "steps.json"):
+                catalog = json.loads(data.decode("ascii"))
+                tool = catalog["Tool"]
+                tool["Title"] = title
+                tool["RequireAdmin"] = args.admin
+                tool["RunRootBase"] = tool["RunRootBase"].replace("__TOOL_ID__", tool_id)
+                data = (json.dumps(catalog, indent=2) + "\n").encode("ascii")
+            elif os.path.splitext(src)[1].lower() in TEXT_EXT:
+                text = tokens.sub(lambda match: repl[match.group()], data.decode("ascii"))
+                if rel == launcher:
+                    text = text.replace("\r\n", "\n").replace("\n", "\r\n")
+                data = text.encode("ascii")
+            rendered.append((dst, rel, data))
+        if not rendered:
+            raise ValueError(f"no template files found in {TEMPLATE}")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"ERROR: could not render the template: {exc}", file=sys.stderr)
+        return 1
+
+    for dst, rel, data in rendered:
         if args.dry_run:
+            print("would write " + rel)
             continue
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        with open(dst, "wb") as f:
+        with open(dst, "wb" if args.force else "xb") as f:
             f.write(data)
+        print("wrote " + rel)
 
     if not args.dry_run:
         print()
@@ -98,7 +113,7 @@ def main() -> int:
         print("  1. Run the demo:   " + launcher + "   (it drives gui\\demo\\Demo-Tool.ps1)")
         print("  2. Run the tests:  powershell -NoProfile -ExecutionPolicy Bypass -File tests\\gui\\Test-Gui.ps1")
         print("  3. Point gui\\steps.json at the tool's real scripts, then delete gui\\demo.")
-        print("     Method: .claude/skills/script-gui/SKILL.md")
+        print("     Method: " + os.path.join(os.path.dirname(HERE), "SKILL.md"))
     return 0
 
 

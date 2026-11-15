@@ -15,22 +15,14 @@
 
   Started by the Run-*Gui.bat launcher (-STA). Windows PowerShell 5.1, pure ASCII, no BOM.
 
-  Test hooks (tests\gui only): -LoadOnly loads the XAML, checks every named control and exits.
-  -SelfTest builds the real dialogs without showing them and checks the typed-word gate and the
-  colour tokens. -AutoStart -Mode <m> -ResultPath <file> runs without a click, writes the final
-  window state to the file and closes. It needs SCRIPTGUI_TEST=1 and is honoured ONLY in a window
-  that is not elevated; SCRIPTGUI_TEST_ANSWERS=<json file> stands in for the operator's clicks, and
-  a dialog with no entry there behaves as if it was closed with the window X (the refusing answer).
+  -LoadOnly checks the XAML and exits. -SelfTest constructs test dialogs and checks the
+  typed-word gate and color tokens. Neither path starts a run.
 #>
 param(
     [string]$ToolRoot = (Split-Path -Parent $PSScriptRoot),
     [string]$RunRootBase = '',
-    [switch]$AllowNotElevated,
     [switch]$LoadOnly,
     [switch]$SelfTest,
-    [switch]$AutoStart,
-    [string]$Mode = '',
-    [string]$ResultPath = '',
     # Light or dark design tokens; System follows the Windows app-mode setting.
     [ValidateSet('System', 'Light', 'Dark')][string]$Theme = 'System'
 )
@@ -77,7 +69,7 @@ if ($vf) { try { $script:Version = ([IO.File]::ReadAllText((Join-Path $ToolRoot 
 
 # ---- elevation: the launcher elevates once; the window never asks again ----------------------
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if ([bool](Get-GuiProp $script:Tool 'RequireAdmin' $false) -and -not $isAdmin -and -not $AllowNotElevated) {
+if ([bool](Get-GuiProp $script:Tool 'RequireAdmin' $false) -and -not $isAdmin -and -not ($LoadOnly -or $SelfTest)) {
     [void][System.Windows.MessageBox]::Show("This window must run as administrator.`n`nClose it and start the Run-*Gui.bat launcher, which asks for administrator rights once.", $script:ToolTitle, 'OK', 'Warning')
     exit 1
 }
@@ -113,34 +105,8 @@ $script:CloseLock = $false
 $script:DlgValue = $null
 $script:DlgChecks = @{}
 $script:DlgText = $null
-$script:ConsoleSaved = Set-GuiConsoleEncoding
 $script:SessionWriteWarned = $false
 $script:Modes = @(Get-GuiModes $script:Catalog)
-
-# Test hooks: canned dialog answers stand in for the operator's clicks. Honoured ONLY in a window
-# that is NOT elevated and only with SCRIPTGUI_TEST=1 and -ResultPath, so a real (elevated) run of a
-# tool that needs administrator rights never has them. A tool that changes things WITHOUT admin
-# rights should not ship its tests\ folder to other people's PCs.
-$script:TestHooksAllowed = (-not $isAdmin) -and [bool]$ResultPath -and ($env:SCRIPTGUI_TEST -eq '1')
-$script:TestAnswers = $null
-if ($script:TestHooksAllowed -and $env:SCRIPTGUI_TEST_ANSWERS -and (Test-Path -LiteralPath $env:SCRIPTGUI_TEST_ANSWERS)) {
-    $script:TestAnswers = [IO.File]::ReadAllText($env:SCRIPTGUI_TEST_ANSWERS) | ConvertFrom-Json
-}
-$script:TestMode = $script:TestHooksAllowed
-$script:AutoStart = ($AutoStart -and $script:TestHooksAllowed)
-$startMode = $(if ($Mode) { $Mode } else { $script:Modes[0].Name })
-if (@($script:Modes | Where-Object { $_.Name -eq $startMode }).Count -eq 0) {
-    Write-Host ('Unknown mode: ' + $startMode + ' (steps.json has: ' + (($script:Modes | ForEach-Object { $_.Name }) -join ', ') + ').') -ForegroundColor Red
-    exit 2
-}
-
-function Get-TestAnswer {
-    param([string]$Id)
-    if (-not $script:TestMode -or $null -eq $script:TestAnswers) { return $null }
-    $p = $script:TestAnswers.PSObject.Properties[$Id]
-    if ($p) { return $p.Value }
-    return $null
-}
 
 function Get-Brush {
     # A design token from MainWindow.xaml ("Brush.<Tone>"). Never a literal colour. An unknown token throws.
@@ -378,19 +344,9 @@ function Show-Dialog {
     # -TypeWord: the button marked NeedsWord stays disabled until the box holds exactly that word
     # (case-sensitive), so the approval is the operator's own typing, never a button alone.
     param(
-        [string]$Id, [string]$Title, [string]$Message, [string]$Detail = '', $Buttons,
+        [string]$Title, [string]$Message, [string]$Detail = '', $Buttons,
         $Checks = @(), [switch]$TextInput, [string]$InputLabel = '', [string]$InputDefault = '', [string]$TypeWord = ''
     )
-    if ($script:TestMode) {
-        $t = Get-TestAnswer $Id
-        if ($null -eq $t) { return $null }
-        # (PowerShell variables are case-insensitive: do not name this $checks, it would overwrite -Checks.)
-        $ticked = @{}
-        foreach ($c in @($Checks)) { $ticked[[string](Get-GuiProp $c 'Key' '')] = [bool](Get-GuiProp $c 'Checked' $false) }
-        $tc = Get-GuiProp $t 'Checks' $null
-        if ($tc) { foreach ($p in $tc.PSObject.Properties) { $ticked[$p.Name] = [bool]$p.Value } }
-        return [pscustomobject]@{ Value = [string](Get-GuiProp $t 'Value' ''); Checks = $ticked; Text = [string](Get-GuiProp $t 'Text' '') }
-    }
     $script:DlgValue = $null; $script:DlgChecks = @{}; $script:DlgText = $null
     $w = New-DialogWindow -Title $Title -Message $Message -Detail $Detail -Buttons $Buttons -Checks $Checks -TextInput:$TextInput -InputLabel $InputLabel -InputDefault $InputDefault -TypeWord $TypeWord
     $script:InDialog = $true
@@ -413,14 +369,6 @@ function Resolve-Prompt {
     # the operator's own answer. The dialog's text and buttons come from steps.json "Prompts".
     param($Pending)
     $child = $script:Child
-    if ($Pending.Kind -eq 'Unknown') {
-        $r = Show-Dialog -Id 'Unknown' -Title 'The tool is waiting for an answer' -Message ('The tool is waiting for an answer:' + "`r`n`r`n" + 'Type an answer and Send, or close this box to send an empty line (the tool''s own default). Choose "This is not a question" only if the tool is still working; this box comes back after a minute if it is still waiting.') -Detail $Pending.Text -TextInput -Buttons @(
-            @{ Text = 'Send'; Value = 'send' }, @{ Text = 'This is not a question'; Value = 'skip' })
-        if ($r -and $r.Value -eq 'skip') { Set-GuiPromptDismissed -Child $child -Text $Pending.Text; Add-ConsoleNote 'Marked as not a question; the tool keeps running.' }
-        elseif ($r -and $r.Value -eq 'send') { Send-GuiAnswer -Child $child -Text $r.Text; Add-ConsoleNote 'Answer sent to the tool.' }
-        else { Send-GuiAnswer -Child $child -Text ''; Add-ConsoleNote 'Box closed: sent an empty line, the tool''s own default.' }
-        return
-    }
     $row = $Pending.Row
     $buttons = @(); $i = 0
     foreach ($b in @(ConvertTo-GuiItems $row.Buttons)) {
@@ -428,7 +376,7 @@ function Resolve-Prompt {
         $i++
     }
     $word = [string](Get-GuiProp $row 'TypeWord' '')
-    $r = Show-Dialog -Id ([string]$row.Id) -Title ([string](Get-GuiProp $row 'Title' 'The tool asks')) `
+    $r = Show-Dialog -Title ([string](Get-GuiProp $row 'Title' 'The tool asks')) `
         -Message ([string](Get-GuiProp $row 'Message' $Pending.Text)) -Detail (Get-RecentConsole ([int](Get-GuiProp $row 'DetailLines' 0))) `
         -Buttons $buttons -TextInput:([bool](Get-GuiProp $row 'Input' $false)) -TypeWord $word
     $idx = $null; $typed = ''
@@ -448,7 +396,7 @@ function Resolve-Ask {
     $buttons = @(@{ Text = [string](Get-GuiProp $def 'AcceptText' 'Continue'); Value = 'accept' })
     $refuseText = [string](Get-GuiProp $def 'RefuseText' '')
     if ($refuseText) { $buttons += @{ Text = $refuseText; Value = 'refuse' } }
-    $r = Show-Dialog -Id $A.Ask -Title ([string](Get-GuiProp $def 'Title' $A.Title)) -Message ([string](Get-GuiProp $def 'Message' '')) `
+    $r = Show-Dialog -Title ([string](Get-GuiProp $def 'Title' $A.Title)) -Message ([string](Get-GuiProp $def 'Message' '')) `
         -Checks $checks -Buttons $buttons -TextInput:([bool]$inp) -InputLabel ([string](Get-GuiProp $inp 'Label' '')) -InputDefault ([string](Get-GuiProp $inp 'Default' ''))
     $accepted = [bool]($r -and $r.Value -eq 'accept')
     $vals = @{}
@@ -553,8 +501,7 @@ function Start-Run {
     catch {
         $msg = $_.Exception.Message
         Add-ConsoleNote ('No run started: ' + $msg)
-        if (-not $script:TestMode) { [void][System.Windows.MessageBox]::Show(('No run was started.' + "`n`n" + $msg), $script:ToolTitle, 'OK', 'Error') }
-        if ($script:AutoStart) { $win.Close() }
+        [void][System.Windows.MessageBox]::Show(('No run was started.' + "`n`n" + $msg), $script:ToolTitle, 'OK', 'Error')
         return
     }
     $script:Session = $sess
@@ -573,6 +520,19 @@ function Start-Run {
     Update-Stepper
     Update-HeaderButtons
     Move-Next
+}
+
+function Start-ActionChild {
+    param($Action)
+    try {
+        $script:Child = Start-GuiChild -ScriptPath $Action.ScriptPath -ArgumentList $Action.Args -WorkingDirectory $script:Session.ToolRoot
+        $script:CloseLock = [bool]$Action.Destructive
+        return $true
+    } catch {
+        Complete-GuiLaunchFailure -Session $script:Session -Action $Action -Message $_.Exception.Message
+        Add-ConsoleNote $script:Session.StopMessage
+        return $false
+    }
 }
 
 function Move-Next {
@@ -594,17 +554,8 @@ function Move-Next {
         $ui.StatusTitle.Text = 'Step ' + $a.StepId + ': ' + $a.Title
         $ui.StatusDetail.Text = ''
         $ui.Busy.IsIndeterminate = $true
-        # A step marked "Destructive" in steps.json cannot be closed while it runs.
-        $script:CloseLock = [bool]$a.Destructive
-        Add-ConsoleLines @('', ('=== Step ' + $a.StepId + ': ' + $a.Title + ' ==='), ('> ' + [IO.Path]::GetFileName($a.ScriptPath) + ' ' + (ConvertTo-GuiArgString $a.Args)))
-        try {
-            $script:Child = Start-GuiChild -ScriptPath $a.ScriptPath -ArgumentList $a.Args -WorkingDirectory $script:Session.ToolRoot
-        } catch {
-            Add-ConsoleNote ('Could not start ' + $a.ScriptPath + ': ' + $_.Exception.Message)
-            [void](Complete-GuiAction -Session $script:Session -Action $a -ExitCode 1 -Message $_.Exception.Message)
-            $script:Action = $null
-            continue
-        }
+        Add-ConsoleLines @('', ('=== Step ' + $a.StepId + ': ' + $a.Title + ' ==='), ('> ' + [IO.Path]::GetFileName($a.ScriptPath)))
+        if (-not (Start-ActionChild $a)) { continue }
         Update-Stepper
         return
     }
@@ -631,28 +582,6 @@ function Complete-Run {
     $ui.BtnNewRun.Visibility = 'Visible'
     Update-Stepper
     Update-HeaderButtons
-    if ($script:TestMode) { Write-ResultFile }
-    if ($script:AutoStart) { $win.Close() }
-}
-
-function Write-ResultFile {
-    # Test hook only (-ResultPath): the final window state, for tests\gui.
-    try {
-        $steps = [ordered]@{}
-        foreach ($id in @($script:StepRows.Keys | Sort-Object)) { $steps[$id] = $script:StepRows[$id].State.Text }
-        $answers = [ordered]@{}
-        foreach ($k in @($script:Session.Answers.Keys | Sort-Object)) { $answers[$k] = $script:Session.Answers[$k] }
-        $doc = [ordered]@{
-            Mode = $script:Session.Mode; Steps = $steps
-            Banner = $ui.BannerText.Text; BannerVisible = ($ui.Banner.Visibility -eq 'Visible')
-            Stopped = [bool]$script:Session.Stopped; FinalStatus = (Get-GuiFinalStatus $script:Session)
-            RunRoot = $script:Session.RunRoot; Answers = $answers
-            ConsoleChars = $ui.ConsoleBox.Text.Length; DpiMode = $script:DpiMode; Theme = $script:ThemeName
-            ResultItems = @(Get-GuiResultItems -Session $script:Session | ForEach-Object { [ordered]@{ Label = $_.Label; Value = $_.Value } })
-            Results = @($script:Session.Results | ForEach-Object { [ordered]@{ Step = $_.StepId; Status = $_.Status; ExitCode = $_.ExitCode; Message = $_.Message } })
-        }
-        ($doc | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $ResultPath -Encoding UTF8
-    } catch { }
 }
 
 function Invoke-Tick {
@@ -664,16 +593,17 @@ function Invoke-Tick {
     }
     if ($u.Exited) {
         $a = $script:Action
+        $script:Child.Process.Dispose()
+        $script:Child = $null
         $script:CloseLock = $false
         # A call marked "Retry": true may be run again when it fails. Nothing is recorded for the
         # failed attempt until the operator decides; the console keeps its output.
         if ([int]$u.ExitCode -ne 0 -and [bool](Get-GuiProp $a.Call 'Retry' $false)) {
-            $r = Show-Dialog -Id 'Retry' -Title ('Step ' + $a.StepId + ' did not finish cleanly') -Message ('"' + $a.Title + '" ended with exit code ' + $u.ExitCode + '. See the console output for why. Run this step again, or continue with the next one?') -Buttons @(
+            $r = Show-Dialog -Title ('Step ' + $a.StepId + ' did not finish cleanly') -Message ('"' + $a.Title + '" ended with exit code ' + $u.ExitCode + '. See the console output for why. Run this step again, or continue with the next one?') -Buttons @(
                 @{ Text = 'Run it again'; Value = 'retry' }, @{ Text = 'Continue'; Value = 'continue' })
             if ($r -and $r.Value -eq 'retry') {
                 Add-ConsoleLines @('', ('=== Step ' + $a.StepId + ': ' + $a.Title + ' (again) ==='))
-                $script:Child = Start-GuiChild -ScriptPath $a.ScriptPath -ArgumentList $a.Args -WorkingDirectory $script:Session.ToolRoot
-                $script:CloseLock = [bool]$a.Destructive
+                if (-not (Start-ActionChild $a)) { Complete-Run }
                 return
             }
         }
@@ -691,9 +621,12 @@ function Invoke-Tick {
     $quiet = (Get-Date).ToUniversalTime() - $script:Child.LastOutputUtc
     $text = 'Running for ' + ('{0:00}:{1:00}' -f [int][Math]::Floor($elapsed.TotalMinutes), $elapsed.Seconds)
     if ($quiet.TotalMinutes -ge 2) { $text += ' - no output for ' + [int][Math]::Floor($quiet.TotalMinutes) + ' minutes (information only; the tool is never stopped automatically)' }
+    $pp = Get-GuiPendingPrompt -Child $script:Child -Catalog $script:Catalog -Call $script:Action.Call
+    if ($pp -and $pp.Kind -eq 'Unknown') {
+        $text += ' - Unrecognized unfinished output. If the tool is waiting for input, check its prompt definition or use the console launcher for a future run.'
+    }
     $ui.StatusDetail.Text = $text
-    $pp = Get-GuiPendingPrompt -Child $script:Child -Catalog $script:Catalog
-    if ($pp) { Resolve-Prompt $pp }
+    if ($pp -and $pp.Kind -eq 'Known') { Resolve-Prompt $pp }
 }
 
 # ---- self-test (no window is shown, nothing runs) -------------------------------------------------
@@ -810,11 +743,9 @@ $win.add_Closing({
             }
             # A program the operator is driving is left open when the window closes ("KeepChildrenOnClose").
             $keep = [bool](Get-GuiProp $script:Action.Call 'KeepChildrenOnClose' $false)
-            if (-not $script:AutoStart) {
-                $q = $(if ($keep) { 'A program this step opened is still running. Close this window? That program stays open; finish or close it yourself.' } else { 'A step is still running. Stop it and close?' })
-                $ans = [System.Windows.MessageBox]::Show($q, $script:ToolTitle, 'YesNo', 'Question')
-                if ($ans -ne 'Yes') { $e.Cancel = $true; return }
-            }
+            $q = $(if ($keep) { 'A program this step opened is still running. Close this window? That program stays open; finish or close it yourself.' } else { 'A step is still running. Stop it and close?' })
+            $ans = [System.Windows.MessageBox]::Show($q, $script:ToolTitle, 'YesNo', 'Question')
+            if ($ans -ne 'Yes') { $e.Cancel = $true; return }
             if ($keep) { Stop-GuiChild $script:Child -KeepDescendants } else { Stop-GuiChild $script:Child }
         }
     })
@@ -868,9 +799,9 @@ $win.add_Loaded({
         Update-TextMode
         Update-CompactLayout
         $timer.Start()
-        if ($script:AutoStart) { Start-Run $startMode }
     })
 
+$script:ConsoleSaved = Set-GuiConsoleEncoding
 try {
     [void]$win.ShowDialog()
 } finally {

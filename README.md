@@ -12,8 +12,9 @@ without a second engine.
 
 From the root of the tool you want to wrap:
 
-    py <path>\skills\script-gui\scripts\new_script_gui.py --target . --title "My Tool" [--admin]
+    py "C:\path\to\Script-Gui-Architecture\skills\script-gui\scripts\new_script_gui.py" --target . --title "My Tool"
 
+Replace the example path with your checkout path. Add `--admin` when the wrapped tool requires elevation.
 Then edit `gui\steps.json`, run `tests\gui\Test-Gui.ps1`, and read `skills\script-gui\references\gotchas.md`
 before changing the kit.
 

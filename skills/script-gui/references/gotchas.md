@@ -24,8 +24,8 @@ tests.
    backslash before a closing quote must be doubled. `ConvertTo-GuiArg` does it; the test checks it.
 7. **A program the script starts can keep the output pipe open** after the script exits. Waiting for
    end-of-file then hangs the window. The kit waits 1.5 s after exit, then moves on.
-8. **A quiet script is not a question.** The generic "waiting for an answer" box fires only on an
-   UNFINISHED line that has been quiet for 5 s. A long scan that ends its lines must not trigger it.
+8. **A quiet script is not a question.** Show unrecognized unfinished text as a possible prompt only after
+   5 quiet seconds. Never write to stdin unless a declared prompt on the active call matches.
 
 ## PowerShell 5.1 inside a WPF window
 
@@ -43,8 +43,8 @@ tests.
 13. **An unbound `[string[]]` parameter is `$null`** and `@($null).Count` threw under strict mode in this
     kit's first test run. Test `$null -ne $x -and $x.Length -gt 0`.
 14. **`return , @(...)` wraps a whole list as ONE item** at the caller. Emit items and collect with `@()`.
-15. **Pure ASCII, no BOM, in every `.ps1`, `.psm1`, `.xaml`, `.json` and `.bat`.** 5.1 reads a BOM-less
-    non-ASCII file as Windows-1252. No smart quotes, no dashes other than `-`, no box characters.
+15. **Pure ASCII, no BOM, in every `.ps1`, `.psm1`, `.xaml`, `.json` and `.bat`.** 5.1 can decode BOM-less PowerShell scripts using the
+    system ANSI code page. ASCII is this template's cross-locale baseline. No smart quotes, no dashes other than `-`, no box characters.
 16. **`.bat` files need CRLF.** The scaffolder writes them that way; an editor may not.
 
 ## The window

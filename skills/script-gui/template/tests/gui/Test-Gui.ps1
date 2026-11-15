@@ -13,8 +13,7 @@
                        refuses; a typed word is required
     D  window          the XAML loads with every named control; the typed-word gate and the
                        colour tokens hold (-SelfTest)
-    E  demo run        ONLY while the catalog still points at gui\demo: drives the real window
-                       through both modes with canned answers
+    E  demo run        runs only the bundled demo against the headless core with stub answers
   Parts A-D are generic and stay valid after the catalog points at the real tool. Replace part E
   with runs of the real catalog against STUB copies of the tool's scripts (stubs that record
   "script|arguments" and write the one file the next step needs), never the real scripts.
@@ -127,6 +126,7 @@ $probeCatalog = [pscustomobject]@{ Prompts = @([pscustomobject]@{ Id = 'P'; Need
 function Invoke-Probe {
     param($ButtonIndex, [string]$Typed)
     $saved = Set-GuiConsoleEncoding
+    $child = $null
     try {
         $child = Start-GuiChild -ScriptPath $probe
         $lines = @(); $seen = $false; $deadline = (Get-Date).AddSeconds(30)
@@ -134,7 +134,7 @@ function Invoke-Probe {
             $u = Update-GuiChild -Child $child
             $lines += @($u.Lines)
             if ($u.Exited) { return [pscustomobject]@{ ExitCode = $u.ExitCode; Lines = $lines; Seen = $seen } }
-            $pp = Get-GuiPendingPrompt -Child $child -Catalog $probeCatalog
+            $pp = Get-GuiPendingPrompt -Child $child -Catalog $probeCatalog -Call @{ Prompts = @('P') }
             if ($pp -and $pp.Kind -eq 'Known') {
                 $seen = $true
                 Send-GuiAnswer -Child $child -Text (Resolve-GuiPromptSend -Row $pp.Row -ButtonIndex $ButtonIndex -Typed $Typed).Send
@@ -143,7 +143,10 @@ function Invoke-Probe {
         }
         Stop-GuiChild $child
         return [pscustomobject]@{ ExitCode = -1; Lines = $lines; Seen = $seen }
-    } finally { Restore-GuiConsoleEncoding $saved }
+    } finally {
+        if ($child) { $child.Process.Dispose() }
+        Restore-GuiConsoleEncoding $saved
+    }
 }
 $r = Invoke-Probe -ButtonIndex 0 -Typed 'GO'
 Check ($r.Seen) 'the prompt printed without a line end is recognised'
@@ -156,53 +159,104 @@ $r = Invoke-Probe -ButtonIndex 1 -Typed ''
 Check ($r.ExitCode -eq 3) 'the refusing button sends the refusing answer'
 Check ((ConvertTo-GuiArg 'C:\a b\c (1)\') -eq '"C:\a b\c (1)\\"') 'a path with spaces, parentheses and a trailing backslash is quoted correctly'
 
+$pending = [pscustomobject]@{
+    Finished = $false; Tail = 'Really do it? [y/N]'; LastOutputUtc = (Get-Date).ToUniversalTime().AddSeconds(-10)
+}
+$unlisted = Get-GuiPendingPrompt -Child $pending -Catalog $probeCatalog -Call @{}
+Check ($unlisted.Kind -eq 'Unknown' -and $null -eq $unlisted.Row) 'a prompt on the wrong call offers no response'
+$pending.Tail = 'Different wording? [Y/n]'
+$unknown = Get-GuiPendingPrompt -Child $pending -Catalog $probeCatalog -Call @{ Prompts = @('P') }
+Check ($unknown.Kind -eq 'Unknown' -and $null -eq $unknown.Row) 'a reworded prompt offers no response'
+$row = $probeCatalog.Prompts[0]
+$row.TypeWord = ''
+$noWord = Resolve-GuiPromptSend -Row $row -ButtonIndex 0 -Typed ''
+Check (-not $noWord.Approved -and $noWord.Send -eq 'n') 'a gated button with no word fails closed'
+$badCatalog = Join-Path $work 'bad-catalog.json'
+$probeCatalog | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $badCatalog -Encoding ASCII
+$validationError = ''
+try { $null = Get-GuiCatalog -Path $badCatalog } catch { $validationError = $_.Exception.Message }
+Check ($validationError -match 'TypeWord') 'the catalog rejects a gated button with no word'
+$typedRow = @{ Refuse = 'n'; Buttons = @(@{ Send = '{Typed}' }) }
+$multi = Resolve-GuiPromptSend -Row $typedRow -ButtonIndex 0 -Typed "one`r`ntwo"
+Check ($multi.Send -eq 'n') 'a multiline input cannot answer more than one prompt'
+$session = New-GuiSession -Mode $modes[0].Name -ToolRoot $ToolRoot
+$fakeCall = @{ Script = 'sample.ps1'; ExitCodes = @{ '1' = @{ Status = 'Done'; Counts = $false } } }
+$fakeEntry = @{ StepId = 'launch-test'; StepTitle = 'Launch test'; Call = $fakeCall }
+$fake = @{ Entry = $fakeEntry; Call = $fakeCall; ScriptPath = (Join-Path $work 'sample.ps1'); Index = 0 }
+Complete-GuiLaunchFailure -Session $session -Action $fake -Message 'Could not create process'
+Check ($session.Stopped -and $session.Results[0].Status -eq 'Failed' -and $null -eq $session.Results[0].ExitCode) 'a launch failure stops without impersonating a script exit code'
+
 # ---- D: window -------------------------------------------------------------------------------------
 Write-Host 'D. Window'
 $start = Join-Path $gui 'Start-Gui.ps1'
-$out = & $psExe -NoProfile -STA -ExecutionPolicy Bypass -File $start -LoadOnly -AllowNotElevated 2>&1 | Out-String
+$out = & $psExe -NoProfile -STA -ExecutionPolicy Bypass -File $start -LoadOnly 2>&1 | Out-String
 Check ($LASTEXITCODE -eq 0 -and $out -match 'LOAD_OK') ('the XAML loads with every named control' + $(if ($out -notmatch 'LOAD_OK') { ' :: ' + $out.Trim() } else { '' }))
 foreach ($theme in 'Light', 'Dark') {
-    $out = & $psExe -NoProfile -STA -ExecutionPolicy Bypass -File $start -SelfTest -AllowNotElevated -Theme $theme 2>&1 | Out-String
+    $out = & $psExe -NoProfile -STA -ExecutionPolicy Bypass -File $start -SelfTest -Theme $theme 2>&1 | Out-String
     Check ($LASTEXITCODE -eq 0 -and $out -match 'SELFTEST_OK') ('typed-word gate and colour tokens hold (' + $theme + ')' + $(if ($out -notmatch 'SELFTEST_OK') { ' :: ' + $out.Trim() } else { '' }))
 }
 
-# ---- E: demo run (only while the catalog still points at gui\demo) --------------------------------
-$isDemo = @($catalog.Steps | ForEach-Object { $_.Calls } | Where-Object { ([string](Get-GuiProp $_ 'Script' '')) -like 'gui\demo\*' }).Count -gt 0
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if ($isDemo -and $isAdmin) { Write-Host 'E. Demo run - SKIPPED: run this test from a window that is NOT elevated (the test hooks refuse to work elevated).' -ForegroundColor Yellow }
-if ($isDemo -and -not $isAdmin) {
-    Write-Host 'E. Demo run through the real window'
-    function Invoke-Window {
-        param([string]$ModeName, $Answers)
-        $result = Join-Path $work ('result-' + [guid]::NewGuid().ToString('N') + '.json')
-        $ansFile = Join-Path $work 'answers.json'
-        ($Answers | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $ansFile -Encoding ASCII
-        $env:SCRIPTGUI_TEST = '1'; $env:SCRIPTGUI_TEST_ANSWERS = $ansFile
-        try { & $psExe -NoProfile -STA -ExecutionPolicy Bypass -File $start -AutoStart -Mode $ModeName -ResultPath $result -RunRootBase (Join-Path $work 'runs') -AllowNotElevated | Out-Null }
-        finally { $env:SCRIPTGUI_TEST = $null; $env:SCRIPTGUI_TEST_ANSWERS = $null }
-        if (-not (Test-Path -LiteralPath $result)) { return $null }
-        return ([IO.File]::ReadAllText($result) | ConvertFrom-Json)
+# ---- E: demo run (only for the bundled demo) -------------------------------------------------------
+$calls = @($catalog.Steps | ForEach-Object { $_.Calls })
+$isDemo = $calls.Count -gt 0 -and @($calls | Where-Object { $_.Script -ne 'gui\demo\Demo-Tool.ps1' }).Count -eq 0
+if ($isDemo) {
+    Write-Host 'E. Bundled demo through the headless core'
+    function Invoke-Demo {
+        param([string]$ModeName, [hashtable]$Options, $ButtonIndex, [string]$Typed)
+        $sess = New-GuiSession -Mode $ModeName -ToolRoot $ToolRoot -RunRootBase (Join-Path $work 'runs') -Interactive
+        $sess.RunRoot = Initialize-GuiRunRoot -Session $sess
+        $saved = Set-GuiConsoleEncoding
+        try {
+            while ($a = Get-GuiNextAction -Session $sess) {
+                if ($a.Kind -eq 'Ask') {
+                    Set-GuiAnswer -Session $sess -Ask $a.Ask -Values $Options
+                    continue
+                }
+                $deadline = (Get-Date).AddSeconds(30)
+                $child = Start-GuiChild -ScriptPath $a.ScriptPath -ArgumentList $a.Args -WorkingDirectory $ToolRoot
+                try {
+                    do {
+                        $u = Update-GuiChild -Child $child
+                        Update-GuiCapture -Session $sess -Action $a -Lines $u.Lines
+                        if ($u.Exited) { break }
+                        $prompt = Get-GuiPendingPrompt -Child $child -Catalog $sess.Catalog -Call $a.Call
+                        if ($prompt -and $prompt.Kind -eq 'Known') {
+                            $answer = Resolve-GuiPromptSend -Row $prompt.Row -ButtonIndex $ButtonIndex -Typed $Typed
+                            Send-GuiAnswer -Child $child -Text $answer.Send
+                        }
+                        Start-Sleep -Milliseconds 100
+                    } while ((Get-Date) -lt $deadline)
+                    if (-not $u.Exited) { throw ('Demo did not finish: ' + $a.Title) }
+                    [void](Complete-GuiAction -Session $sess -Action $a -ExitCode $u.ExitCode)
+                } finally {
+                    if (-not $child.Finished) { Stop-GuiChild $child }
+                    $child.Process.Dispose()
+                }
+            }
+        } finally { Restore-GuiConsoleEncoding $saved }
+        return $sess
     }
-    $r = Invoke-Window 'Check' @{}
-    Check ($null -ne $r -and -not $r.Stopped -and $r.FinalStatus -eq 0) 'Check mode finishes cleanly'
-    Check ($null -ne $r -and $r.Steps.'2' -eq 'not part of this mode') 'Check mode never runs the change step'
-    Check ($null -ne $r -and -not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Check mode changed nothing'
 
-    $r = Invoke-Window 'Full' @{ Options = @{ Value = 'accept'; Checks = @{ Thorough = $true }; Text = 'hello there' }; ApplyConfirm = @{ Value = '0'; Text = 'APPLY' } }
-    $changeFile = $(if ($r) { Join-Path $r.RunRoot 'change.txt' } else { '' })
-    Check ($null -ne $r -and (Test-Path -LiteralPath $changeFile)) 'Full mode: accepted and typed APPLY -> the change ran'
-    Check ($changeFile -and (Test-Path -LiteralPath $changeFile) -and ([IO.File]::ReadAllText($changeFile).Trim() -eq 'applied thorough note=hello there')) 'the tick box and the typed text reached the script as arguments'
-    Check ($null -ne $r -and @($r.ResultItems | Where-Object { $_.Label -eq 'Summary' -and $_.Value -eq '3 items changed' }).Count -eq 1) 'a value the script printed was captured for the results panel'
+    $r = Invoke-Demo -ModeName Check
+    Check (-not $r.Stopped -and (Get-GuiFinalStatus $r) -eq 0) 'Check mode finishes cleanly'
+    Check (@($r.Results | Where-Object StepId -eq '2').Count -eq 0) 'Check mode never runs the change step'
+    Check (-not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Check mode changed nothing'
 
-    $r = Invoke-Window 'Full' @{ Options = @{ Value = 'accept' } }
-    Check ($null -ne $r -and -not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Full mode: confirmation box closed -> nothing changed'
-    Check ($null -ne $r -and $r.Steps.'2' -like 'done - Not applied*') 'the declined change is shown as declined, not as a failure'
+    $r = Invoke-Demo -ModeName Full -Options @{ DoChange = $true; Thorough = $true; Note = 'hello there' } -ButtonIndex 0 -Typed 'APPLY'
+    $changeFile = Join-Path $r.RunRoot 'change.txt'
+    Check (Test-Path -LiteralPath $changeFile) 'Full mode: accepted and typed APPLY -> the change ran'
+    Check ((Test-Path -LiteralPath $changeFile) -and ([IO.File]::ReadAllText($changeFile).Trim() -eq 'applied thorough note=hello there')) 'the options reached the script as arguments'
+    Check (@(Get-GuiResultItems -Session $r | Where-Object { $_.Label -eq 'Summary' -and $_.Value -eq '3 items changed' }).Count -eq 1) 'a value the script printed was captured for the results panel'
 
-    $r = Invoke-Window 'Full' @{ Options = @{ Value = 'accept' }; ApplyConfirm = @{ Value = '0'; Text = 'apply' } }
-    Check ($null -ne $r -and -not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Full mode: wrong word typed -> nothing changed'
+    $r = Invoke-Demo -ModeName Full -Options @{ DoChange = $true }
+    Check (-not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Full mode: confirmation closed -> nothing changed'
+    Check (@($r.Results | Where-Object { $_.StepId -eq '2' -and $_.Status -eq 'Done' -and $_.Message -like 'Not applied*' }).Count -eq 1) 'the declined change is recorded as declined'
 
-    $r = Invoke-Window 'Full' @{}
-    Check ($null -ne $r -and $r.Steps.'2' -like 'skipped*' -and -not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Full mode: options box closed -> the change step is skipped'
+    $r = Invoke-Demo -ModeName Full -Options @{ DoChange = $true } -ButtonIndex 0 -Typed 'apply'
+    Check (-not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Full mode: wrong word typed -> nothing changed'
+
+    $r = Invoke-Demo -ModeName Full -Options @{ DoChange = $false }
+    Check (@($r.Results | Where-Object { $_.StepId -eq '2' -and $_.Status -eq 'Skipped' }).Count -eq 1 -and -not (Test-Path -LiteralPath (Join-Path $r.RunRoot 'change.txt'))) 'Full mode: options refused -> the change step is skipped'
 }
 
 if (-not $KeepWork) { try { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction Stop } catch { } } else { Write-Host ('Work folder kept: ' + $work) }

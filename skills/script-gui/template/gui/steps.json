@@ -1,5 +1,5 @@
 {
-  "SchemaVersion": 1,
+  "SchemaVersion": 2,
   "Note": "The single list of steps the window can run. It only NAMES the tool's own scripts and their arguments, in order. Never put the tool's logic here or in the window. Schema: .claude/skills/script-gui/references/catalog.md in the rinv-ai repo.",
   "Tool": {
     "Title": "__TOOL_TITLE__",
@@ -68,7 +68,7 @@
           "Args": ["-Action", "Change", "-OutDir", "{RunRoot}",
                    { "When": ["Answer:Thorough"], "Args": ["-Thorough"] },
                    { "When": ["Answer:Note"], "Args": ["-Note", "{Answer:Note}"] }],
-          "Ask": "Options", "When": ["Answer:DoChange"], "SkipText": "Skipped by the operator.",
+          "Ask": "Options", "Prompts": ["ApplyConfirm"], "When": ["Answer:DoChange"], "SkipText": "Skipped by the operator.",
           "OnNonZero": "Warn", "NonZeroText": "The change did not finish cleanly.",
           "ExitCodes": { "3": { "Status": "Done", "Message": "Not applied - you declined.", "Counts": false } } }
       ]

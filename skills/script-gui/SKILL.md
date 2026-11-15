@@ -29,8 +29,11 @@ should add little beyond `steps.json`; the kit itself is about 2,100 lines (layo
 ## When it fits
 
 Fits: a tool that runs steps in order, prints progress, sometimes asks a question, and reports through
-exit codes and files. Examples in this repo: `student-cleanup/`, `remote-diagnostics/` pull tools,
-`usb-backup` setup.
+exit codes and files. ScreenConnect Cleanup is the worked example for a legacy batch pipeline.
+For a read-only diagnostic, start with one unelevated mode, no prompts, and a structured report.
+For a backup or repair tool you own, consider one shared runner for CLI and GUI. Keep the preview
+and approval in that runner or its scripts. Use PowerShell's `ShouldProcess` where `-WhatIf` and
+`-Confirm` fit the operation.
 
 Does not fit: a tool whose main screen is an editor or a form with live state (the hour grid of
 `student-times-gui`, a settings editor). Those need a purpose-built window; do not bend this kit into one.
@@ -60,10 +63,11 @@ Does not fit: a tool whose main screen is an editor or a form with live state (t
 2. **Scaffold** (from the repo root; `python3` on WSL2):
 
    ```
-   py .claude/skills/script-gui/scripts/new_script_gui.py --target <tool folder> --title "<Tool Name>" [--admin]
+   py "<skill folder>/scripts/new_script_gui.py" --target "<tool folder>" --title "<Tool Name>"
    ```
 
-   `--admin` = the tool needs administrator rights (one UAC prompt, the window refuses to run without).
+   Replace `<skill folder>` with the directory containing this `SKILL.md`. Add `--admin` if the tool
+   needs administrator rights (one UAC prompt and an elevated window).
    Existing files are never overwritten without `--force`. Then run the tests once to see the demo pass:
    `powershell -NoProfile -ExecutionPolicy Bypass -File tests\gui\Test-Gui.ps1` (not elevated).
 
@@ -73,9 +77,14 @@ Does not fit: a tool whose main screen is an editor or a form with live state (t
    - Questions the **launcher** asked (`set /p`) become **Asks**: a dialog before the step, whose tick
      boxes and text feed `When` conditions and arguments.
    - Questions a **script** asks (`Read-Host`) become **Prompts**: the window recognises the question in
-     the script's output, shows a dialog, and sends the answer to the script. The script keeps its gate.
+     the script's output only when the active call lists that prompt ID. The window shows a dialog
+     and sends the selected answer. The script keeps its gate. Use distinct prompt text for each
+     question within a call and test it with redirected input.
    - Copy each step's failure rule from the launcher exactly (`OnNonZero`, `ExitCodes`, `RequireOutput`).
-     Do not redesign them.
+     Distinguish failure to start a process from any exit code returned by the script.
+   - Keep passwords, tokens and other secrets out of arguments, prompts and script output. The window
+     saves child output to the run log. For an elevated workflow that reads prior artifacts, have the
+     engine create and validate a protected run folder (see the ScreenConnect reference).
    - Delete `gui\demo` once nothing points at it.
 
 4. **Fix the scripts' prompts** (this is usually the only change to the tool). Every question must be
@@ -103,30 +112,28 @@ Does not fit: a tool whose main screen is an editor or a form with live state (t
    (the demo run) with runs of the real catalog against **stub** copies of the tool's scripts - stubs
    that record `script|arguments` and write the one file the next step needs - and compare the calls with
    what the launcher makes. That call-parity test is what stops the window drifting from the console
-   flow. Never drive the real scripts from a test. Model: `screenconnect-cleanup/tests/gui/`.
+   flow. Include launch failure, output missing, declined changes, prompt wording drift, and exit codes
+   that indicate findings. Never drive the real scripts from a test. Model:
+   `screenconnect-cleanup/tests/gui/Test-GuiCallParity.ps1`.
 
 8. **Keep the console launcher.** The `.bat` the tool already has stays, unchanged, as the fallback.
 
 9. **Verify on a real PC what the tests cannot**: the UAC relaunch, a real destructive step through the
-   dialog, a 125% / 150% scaled laptop screen, and any program a step opens (with the console hidden, does
-   its window still appear?). Say plainly in the handover which of these were not done.
+   dialog on a disposable Windows machine with known fixtures, a 125% / 150% scaled laptop screen, and
+   any program a step opens. State which checks were run in the handover.
 
-10. **Repo rules that apply to the new files**: add them to the tool's component in the encyclopedia
-    (`system-docs` skill) and to its NAS copy if it has one; everything stays PowerShell 5.1, pure ASCII,
-    no BOM. The files under `gui\` keep fixed names (the launcher starts them by path, nobody picks them
-    by filename), so the dated-filename convention does not apply to them; the tool's own version stays
-    where it already is (`Tool.VersionFile` shows it in the title).
+10. **Apply the target repository's conventions.** The supplied kit targets Windows PowerShell 5.1
+    and uses ASCII source files, fixed GUI filenames and CRLF for the launcher. Set `Tool.VersionFile`
+    if the tool publishes a version file.
 
 ## Rules the kit enforces - do not weaken them
 
 - An approving answer reaches a script only as the direct result of the operator's click or typing in a
-  dialog that names what is approved. Closing a dialog with the X sends the refusing answer.
-- Nothing is remembered between runs; there is no unattended mode. The test hooks work only in a window
-  that is not elevated and only with `SCRIPTGUI_TEST=1`.
+  dialog that names what is approved. Closing a recognized prompt dialog sends its explicit refusing
+  answer. An unfinished line that was not recognized receives no response.
+- Each run collects fresh answers. Automated answers live in the headless stub tests.
 - One child process at a time; the window sets no timeouts and never kills a step on its own.
 - A `Destructive` step cannot be closed while it runs.
-- A prompt nobody listed still gets a plain "the tool is waiting for an answer" box after 5 quiet
-  seconds, so a reworded question degrades instead of hanging.
 - `gui-session.json` in the run folder is display data. Nothing reads it to decide what may run.
 - Every state has a word, not only a colour. Colours come only from the tokens in `MainWindow.xaml`.
 
@@ -135,12 +142,13 @@ Does not fit: a tool whose main screen is an editor or a form with live state (t
 Read `references/gotchas.md` first. Each item there is a bug that was already hit once (invisible
 prompts, the byte order mark on UTF-8 consoles, script-block handlers on other threads, hashtable keys,
 DPI). After any change to `template\`, scaffold into a scratch folder whose name has a space and
-parentheses and run its `Test-Gui.ps1`; all checks must pass (47 on the unchanged demo).
+parentheses and run its `Test-Gui.ps1`. Profile a noisy child before tuning the dispatcher, log
+batching or console updates.
 
-## Status (2026-11-15)
+## Verification status
 
-Built and tested on Windows 11, Windows PowerShell 5.1, not elevated: 47 of 47 checks, in a folder named
-`sg demo (1)`; two deliberate breaks of the typed-word gate were both caught; the finished window was
-rendered and looked at. **Not yet done:** the launcher's UAC path, an elevated window, Windows 10,
-scaled screens, and a first real tool built on it (ScreenConnect Cleanup keeps its own, older copy of
-this code; it was not migrated).
+The original demo passed 47 checks on Windows 11 with Windows PowerShell 5.1 in an unelevated
+interactive session. The current revision adds prompt-contract and process-start checks, and moves
+scripted demo runs into the headless harness. Re-run `Test-Gui.ps1` on Windows for current results.
+UAC, Windows 10, scaled screens and adoption by another tool still need field verification.
+ScreenConnect keeps its own implementation.

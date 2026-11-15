@@ -1,7 +1,8 @@
 # gui\steps.json - the catalog
 
-One JSON file describes everything the window does. The kit's code reads it; you should not need to
-edit the kit to add a step, a question or a result. A working example is `template/gui/steps.json`.
+The catalog describes steps, questions and results. The working version 2 example is
+`template/gui/steps.json`. When updating a version 1 catalog, add each prompt ID to the calls
+that can emit it, then set `"SchemaVersion": 2`.
 
 Paths in the catalog are relative to the tool folder (the parent of `gui\`). Backslashes are doubled
 in JSON (`"gui\\demo\\Demo-Tool.ps1"`).
@@ -33,25 +34,33 @@ Used in `When`, `Needs` and conditional argument groups. A list means all must h
 ## Tool
 
 ```json
-"Tool": {
-  "Title": "Student Cleanup",          window title and header
-  "RequireAdmin": true,                the window refuses to run unless elevated; keep SG_NEED_ADMIN in the .bat equal
-  "RunRootBase": "C:\\RIT-Cleanup",    where run folders go; %ENV% names are expanded; "" if no mode needs one
-  "VersionFile": "VERSION",            optional file whose text is shown after the title
-  "Footer": "",                        optional one line under the console
-  "DoneText": "Finished.",             the green banner after a clean run
-  "LockedText": "..."                  shown when someone tries to close the window during a Destructive step
+{
+  "Tool": {
+    "Title": "Student Cleanup",
+    "RequireAdmin": true,
+    "RunRootBase": "C:\\RIT-Cleanup",
+    "VersionFile": "VERSION",
+    "Footer": "",
+    "DoneText": "Finished.",
+    "LockedText": "..."
+  }
 }
 ```
+
+Keep `RequireAdmin` in sync with `SG_NEED_ADMIN` in the batch launcher. `RunRootBase`
+supports `%ENV%` expansion. Use an empty base only when every mode skips run-folder creation.
+`VersionFile`, `Footer`, `DoneText` and `LockedText` customize the header, footer and status messages.
 
 ## Modes
 
 What the start panel offers, in this order. One mode is fine.
 
 ```json
-"Modes": {
-  "Check": { "Phase": "CHECK", "RunRoot": "new",  "Label": "Check only - nothing is changed", "Description": "..." },
-  "Stage": { "Phase": "STAGE", "RunRoot": "none", "Label": "Download tools only", "Description": "..." }
+{
+  "Modes": {
+    "Check": { "Phase": "CHECK", "RunRoot": "new",  "Label": "Check only - nothing is changed", "Description": "..." },
+    "Stage": { "Phase": "STAGE", "RunRoot": "none", "Label": "Download tools only", "Description": "..." }
+  }
 }
 ```
 
@@ -64,7 +73,7 @@ What the start panel offers, in this order. One mode is fine.
 
 ```json
 { "Id": "2", "Title": "Change", "Destructive": true, "Phases": ["FULL"],
-  "Calls": [ { "Script": "Do-Change.ps1", "Args": ["-OutDir", "{RunRoot}"], ... } ] }
+  "Calls": [ { "Script": "Do-Change.ps1", "Args": ["-OutDir", "{RunRoot}"] } ] }
 ```
 
 `Id` is what the operator sees ("2", "6a"). A step shows as one row; its calls run in order.
@@ -77,6 +86,7 @@ Call fields:
 | `Script` | script to run, relative to the tool folder | required |
 | `Args` | list of strings (tokens expanded) and conditional groups `{ "When": [...], "Args": [...] }` | none |
 | `Phases` | limit this one call to some phases | the step's |
+| `Prompts` | IDs of all prompt rows this call can emit | none |
 | `Ask` | name of an Ask to show before this call (asked once per run) | none |
 | `When` | conditions; false = the call is recorded as skipped | always |
 | `SkipText` | what the skipped row says | "Not needed." |
@@ -86,7 +96,7 @@ Call fields:
 | `MissingMessage` | text for that | generic |
 | `OnNonZero` | exit code not 0: `Warn` (mark the run, continue), `Ignore`, `Stop` | `Warn` |
 | `NonZeroText`, `StopMessage` | texts for those | generic |
-| `ExitCodes` | per-code override, see below | none |
+| `ExitCodes` | per-code override for an exit returned by a started script | none |
 | `RequireOutput` | file that must exist after exit 0, else the run stops | none |
 | `SetVar` | `{ "Name": "value with tokens" }` set after the call | none |
 | `Capture` | `[ { "Var": "Url", "Pattern": "^UPLOAD: (\\S+)$" } ]` - a value the script prints (group 1) | none |
@@ -97,9 +107,11 @@ Call fields:
 `ExitCodes` - when a code is a finding or a normal answer rather than a failure:
 
 ```json
-"ExitCodes": {
-  "1": { "Status": "Alert", "Message": "Removed items came back.", "Stop": false },
-  "3": { "Status": "Done",  "Message": "Not applied - you declined.", "Counts": false }
+{
+  "ExitCodes": {
+    "1": { "Status": "Alert", "Message": "Removed items came back.", "Stop": false },
+    "3": { "Status": "Done",  "Message": "Not applied - you declined.", "Counts": false }
+  }
 }
 ```
 
@@ -109,19 +121,23 @@ code out of the run's final status.
 **Order of checks for one call:** Ask (if its other conditions hold) -> `When` -> script exists ->
 `Needs` -> `Before` hook -> run -> exit-code rule -> `RequireOutput` -> `SetVar` -> `After` hook.
 
+A process that fails to start stops the run with a failed step and no child exit code.
+
 ## Asks - questions before a step
 
 For choices the console launcher asked with `set /p`, and for options the scripts take as arguments.
 
 ```json
-"Asks": {
-  "Options": {
-    "Title": "Options", "Message": "Choose how it should run.",
-    "Checks": [ { "Key": "Thorough", "Text": "Thorough mode", "Checked": false },
-                { "Key": "ResetGpo", "Text": "Also reset policy", "Checked": false, "DependsOn": "Thorough" } ],
-    "Input":  { "Key": "Note", "Label": "Note (optional)", "Default": "" },
-    "Sets": "DoChange", "Default": false,
-    "AcceptText": "Continue", "RefuseText": "Skip the change"
+{
+  "Asks": {
+    "Options": {
+      "Title": "Options", "Message": "Choose how it should run.",
+      "Checks": [ { "Key": "Thorough", "Text": "Thorough mode", "Checked": false },
+                  { "Key": "ResetGpo", "Text": "Also reset policy", "Checked": false, "DependsOn": "Thorough" } ],
+      "Input":  { "Key": "Note", "Label": "Note (optional)", "Default": "" },
+      "Sets": "DoChange", "Default": false,
+      "AcceptText": "Continue", "RefuseText": "Skip the change"
+    }
   }
 }
 ```
@@ -139,37 +155,45 @@ prompt (next section).
 ## Prompts - questions a script asks with Read-Host
 
 ```json
-"Prompts": [
-  { "Id": "ApplyConfirm",
-    "Needles": ["Apply the change? [y/N]"],          exact text the script prints, without the line end
-    "Scripts": ["Do-Change.ps1"],                    where that text lives (the test checks it is still there)
-    "Title": "Confirm the change", "Message": "...\r\n\r\nType APPLY to confirm.",
-    "DetailLines": 6,                                show the last N console lines in the box
-    "TypeWord": "APPLY",                             approve button stays disabled until exactly this is typed
-    "Buttons": [ { "Text": "Apply", "Send": "y", "NeedsWord": true },
-                 { "Text": "Do not apply", "Send": "n" } ],
-    "Refuse": "n",                                   sent when the box is closed with the X
-    "Lock": true }                                   after approval the window cannot be closed until the step ends
-]
+{
+  "Prompts": [
+    { "Id": "ApplyConfirm",
+      "Needles": ["Apply the change? [y/N]"],
+      "Scripts": ["Do-Change.ps1"],
+      "Title": "Confirm the change", "Message": "...\r\n\r\nType APPLY to confirm.",
+      "DetailLines": 6,
+      "TypeWord": "APPLY",
+      "Buttons": [ { "Text": "Apply", "Send": "y", "NeedsWord": true },
+                   { "Text": "Do not apply", "Send": "n" } ],
+      "Refuse": "n",
+      "Lock": true }
+  ]
+}
 ```
 
-- A prompt matches when the script's **unfinished output line** equals a Needle exactly (case-sensitive,
-  trimmed). So the script must print it with `Write-Host '<text>' -NoNewline` and then `Read-Host`.
+- List each row's `Id` in `Prompts` on the calls that may emit it. A row matches when the active
+  call declares it and the script's **unfinished output line** equals a Needle exactly (case-sensitive,
+  trimmed). Print it with `Write-Host '<text>' -NoNewline` then use `Read-Host`. `Scripts` lists source
+  files for the contract test. An unrecognized line receives no reply.
 - `Send` is the exact line written to the script. `"Send": "{Typed}"` sends what the operator typed
   (use with `"Input": true` for free text such as a list of numbers).
 - A script that itself wants a word typed (`Type REMOVE to confirm`): `"TypeWord": "REMOVE"`, button
   `{ "Send": "{Typed}", "NeedsWord": true }`, `"Refuse": ""`.
-- `Refuse` must be the script's own "no". The test fails if it equals what an approving button sends.
+- Declare the script's exact single-line refusal in `Refuse`. For a row with `TypeWord`, every
+  button that sends a different response must use `NeedsWord`; an ungated button must send
+  `Refuse`. Set `Lock` when approval starts a change that cannot be interrupted.
 - Three or more buttons are fine (for example Y / F / stop).
 
 ## Results - the finish panel
 
 ```json
-"Results": [
-  { "Label": "Report", "Path": "{RunRoot}\\report.html" },      a file; shown with an Open button, or "not produced"
-  { "Label": "Paste link", "Var": "ShareUrl" },                  a captured value; hidden when empty
-  { "Label": "Note", "Text": "Mode {Mode}", "When": ["Phase:FULL"] }
-]
+{
+  "Results": [
+    { "Label": "Report", "Path": "{RunRoot}\\report.html" },
+    { "Label": "Paste link", "Var": "ShareUrl" },
+    { "Label": "Note", "Text": "Mode {Mode}", "When": ["Phase:FULL"] }
+  ]
+}
 ```
 
 ## Hooks - gui\Gui.Tool.psm1 (optional)

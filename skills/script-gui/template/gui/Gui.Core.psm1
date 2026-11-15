@@ -19,7 +19,7 @@
 
 Set-StrictMode -Version 2.0
 
-$script:GuiKitVersion = '2026-11-15.1'
+$script:GuiKitVersion = '2026-11-15.2'
 $script:Hooks = @{}
 
 function Get-GuiKitVersion { return $script:GuiKitVersion }
@@ -127,13 +127,15 @@ function Get-GuiHook {
 function Get-GuiCatalog {
     param([string]$Path = (Join-Path $PSScriptRoot 'steps.json'))
     $text = [IO.File]::ReadAllText($Path)
-    try { return ($text | ConvertFrom-Json -ErrorAction Stop) }
+    try { $catalog = $text | ConvertFrom-Json -ErrorAction Stop }
     catch {
         # ConvertFrom-Json's own message repeats the whole file; keep only its first sentence.
         $why = ([string]$_.Exception.Message -split "`r?`n")[0]
         if ($why.Length -gt 160) { $why = $why.Substring(0, 160) }
         throw ('steps.json is not valid JSON (' + $Path + '): ' + $why + ' Most often a single backslash: write \\ inside JSON strings.')
     }
+    Assert-GuiPromptCatalog -Catalog $catalog
+    return $catalog
 }
 
 function Get-GuiModes {
@@ -484,6 +486,17 @@ function Complete-GuiAction {
     return [pscustomobject]@{ Status = $status; Stop = $stop; Message = $text; ExitCode = $ExitCode; StepId = $Action.StepId }
 }
 
+function Complete-GuiLaunchFailure {
+    param($Session, $Action, [string]$Message)
+    $messageText = 'Could not start ' + [IO.Path]::GetFileName($Action.ScriptPath) + ': ' + $Message
+    Set-GuiPipeRc $Session 1
+    $Session.Stopped = $true
+    $Session.StopMessage = $messageText
+    $Session.Index = $Action.Index + 1
+    $Session.Current = $null
+    [void](Add-GuiResult $Session $Action.Entry 'Failed' $messageText)
+}
+
 function Get-GuiFinalStatus {
     param($Session)
     return [int]$Session.PipeRc
@@ -578,7 +591,7 @@ function Start-GuiChild {
     $outBuf = New-Object char[] 4096
     $errBuf = New-Object char[] 4096
     return [pscustomobject]@{
-        Process = $p; CommandLine = ($psi.FileName + ' ' + $argText)
+        Process = $p
         OutBuf = $outBuf; ErrBuf = $errBuf
         # Characters, not lines: a prompt printed with -NoNewline never ends its line, so a line
         # reader would never return it and the window would wait forever on a question it cannot see.
@@ -588,7 +601,7 @@ function Start-GuiChild {
         Tail = ''; ErrTail = ''
         PendingLines = (New-Object System.Collections.ArrayList)
         StartedUtc = (Get-Date).ToUniversalTime(); LastOutputUtc = (Get-Date).ToUniversalTime(); ExitedUtc = $null
-        DismissedTail = ''; DismissedUtc = $null; Finished = $false; ExitCode = $null
+        Finished = $false; ExitCode = $null
     }
 }
 
@@ -650,12 +663,13 @@ function Send-GuiAnswer {
     # byte order mark). The caller must have shown a dialog that named the thing being approved
     # and must pass the operator's own choice.
     param($Child, [AllowEmptyString()][string]$Text)
+    if ($Text -match '[\r\n]') { throw 'A prompt answer must contain a single line.' }
     $enc = [Console]::InputEncoding
     $bytes = $enc.GetBytes($Text + "`r`n")
     $s = $Child.Process.StandardInput.BaseStream
     $s.Write($bytes, 0, $bytes.Length)
     $s.Flush()
-    [void]$Child.PendingLines.Add('[GUI sent answer: ' + $(if ($Text -eq '') { '(empty line)' } else { $Text }) + ']')
+    [void]$Child.PendingLines.Add('[GUI sent a prompt response]')
     $Child.Tail = ''
     $Child.LastOutputUtc = (Get-Date).ToUniversalTime()
 }
@@ -683,31 +697,70 @@ function Get-GuiPromptTable {
     return @(ConvertTo-GuiItems (Get-GuiProp $Catalog 'Prompts' $null))
 }
 
-function Get-GuiPendingPrompt {
-    # Known prompts match the table. Any other line that sits unfinished and quiet for
-    # -QuietSeconds becomes a generic "the tool is waiting for an answer" box, so a prompt nobody
-    # listed degrades to a plain dialog instead of hanging the window. Complete lines never
-    # trigger it, so a long quiet step does not look like a question. A box the operator marked
-    # "not a question" stays away for -RepeatSeconds.
-    param($Child, $Catalog, [int]$QuietSeconds = 5, [int]$RepeatSeconds = 60)
-    if ($Child.Finished) { return $null }
-    $t = ([string]$Child.Tail).Trim()
-    if ($t -eq '') { return $null }
+function Assert-GuiPromptCatalog {
+    param($Catalog)
+    $byId = @{}
     foreach ($row in (Get-GuiPromptTable $Catalog)) {
-        foreach ($n in @(ConvertTo-GuiItems $row.Needles)) {
-            if ($t -ceq ([string]$n).Trim()) { return [pscustomobject]@{ Kind = 'Known'; Row = $row; Text = $t } }
+        $id = [string](Get-GuiProp $row 'Id' '')
+        if (-not $id -or $byId.ContainsKey($id)) { throw ('Missing or duplicate prompt ID: ' + $id) }
+        $byId[$id] = $row
+        $buttons = @(ConvertTo-GuiItems (Get-GuiProp $row 'Buttons' $null))
+        $needles = @(ConvertTo-GuiItems (Get-GuiProp $row 'Needles' $null))
+        $word = [string](Get-GuiProp $row 'TypeWord' '')
+        $refuse = Get-GuiProp $row 'Refuse' $null
+        if ($null -eq $refuse -or [string]$refuse -match '[\r\n]') { throw ('Prompt must declare a single-line Refuse value: ' + $id) }
+        if ($buttons.Count -eq 0 -or $needles.Count -eq 0) { throw ('Prompt needs buttons and matching text: ' + $id) }
+        $gated = @($buttons | Where-Object { [bool](Get-GuiProp $_ 'NeedsWord' $false) })
+        $hasWord = -not [string]::IsNullOrWhiteSpace($word)
+        if ($hasWord -ne ($gated.Count -gt 0) -or $word -match '[\r\n]') { throw ('Prompt must pair TypeWord with NeedsWord: ' + $id) }
+        foreach ($button in $buttons) {
+            $send = [string](Get-GuiProp $button 'Send' $refuse)
+            if ($send -match '[\r\n]') { throw ('Prompt button response must be a single line: ' + $id) }
+            if (-not $hasWord) { continue }
+            $needs = [bool](Get-GuiProp $button 'NeedsWord' $false)
+            if ($needs -and $send -eq '{Typed}') { $send = $word }
+            if ($needs -eq ($send -eq [string]$refuse)) {
+                throw ('Prompt buttons must keep approval and refusal separate: ' + $id)
+            }
         }
     }
-    $now = (Get-Date).ToUniversalTime()
-    if (($now - $Child.LastOutputUtc).TotalSeconds -lt $QuietSeconds) { return $null }
-    if ($Child.DismissedTail -eq $t -and $Child.DismissedUtc -and ($now - $Child.DismissedUtc).TotalSeconds -lt $RepeatSeconds) { return $null }
-    return [pscustomobject]@{ Kind = 'Unknown'; Row = $null; Text = $t }
+    $usedIds = @{}
+    foreach ($step in @(ConvertTo-GuiItems (Get-GuiProp $Catalog 'Steps' $null))) {
+        foreach ($call in @(ConvertTo-GuiItems (Get-GuiProp $step 'Calls' $null))) {
+            $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($id in @(ConvertTo-GuiItems (Get-GuiProp $call 'Prompts' $null))) {
+                if (-not $byId.ContainsKey([string]$id)) { throw ('Unknown prompt ID for ' + $call.Script + ': ' + $id) }
+                $usedIds[[string]$id] = $true
+                foreach ($needle in @(ConvertTo-GuiItems $byId[[string]$id].Needles)) {
+                    $text = ([string]$needle).Trim()
+                    if (-not $text -or $text -match '[\r\n]' -or -not $seen.Add($text)) {
+                        throw ('Empty, multiline or duplicate prompt text for ' + $call.Script + ': ' + $id)
+                    }
+                }
+            }
+        }
+    }
+    foreach ($id in $byId.Keys) {
+        if (-not $usedIds.ContainsKey($id)) { throw ('Prompt is not assigned to any call: ' + $id) }
+    }
 }
 
-function Set-GuiPromptDismissed {
-    param($Child, [string]$Text)
-    $Child.DismissedTail = $Text
-    $Child.DismissedUtc = (Get-Date).ToUniversalTime()
+function Get-GuiPendingPrompt {
+    # An unfinished line can be a prompt or progress. Only a match declared by this call
+    # can authorize a reply. An unrecognized quiet line provides diagnostic information only.
+    param($Child, $Catalog, $Call, [int]$QuietSeconds = 5)
+    if ($Child.Finished) { return $null }
+    $text = ([string]$Child.Tail).Trim()
+    if (-not $text) { return $null }
+    $allowed = @(ConvertTo-GuiItems (Get-GuiProp $Call 'Prompts' $null))
+    foreach ($row in (Get-GuiPromptTable $Catalog)) {
+        if ($allowed -notcontains [string]$row.Id) { continue }
+        foreach ($needle in @(ConvertTo-GuiItems $row.Needles)) {
+            if ($text -ceq ([string]$needle).Trim()) { return [pscustomobject]@{ Kind = 'Known'; Row = $row; Text = $text } }
+        }
+    }
+    if (((Get-Date).ToUniversalTime() - $Child.LastOutputUtc).TotalSeconds -lt $QuietSeconds) { return $null }
+    return [pscustomobject]@{ Kind = 'Unknown'; Row = $null; Text = $text }
 }
 
 function Resolve-GuiPromptSend {
@@ -723,9 +776,10 @@ function Resolve-GuiPromptSend {
     $b = $buttons[$i]
     $word = [string](Get-GuiProp $Row 'TypeWord' '')
     $needs = [bool](Get-GuiProp $b 'NeedsWord' $false)
-    if ($needs -and $word -and ($Typed -cne $word)) { return [pscustomobject]@{ Send = $refuse; Approved = $false } }
+    if ($needs -and ([string]::IsNullOrWhiteSpace($word) -or $Typed -cne $word)) { return [pscustomobject]@{ Send = $refuse; Approved = $false } }
     $send = [string](Get-GuiProp $b 'Send' $refuse)
     if ($send -eq '{Typed}') { $send = [string]$Typed }
+    if ($send -match '[\r\n]') { return [pscustomobject]@{ Send = $refuse; Approved = $false } }
     return [pscustomobject]@{ Send = $send; Approved = $needs }
 }
 
@@ -752,7 +806,7 @@ Export-ModuleMember -Function `
     Get-GuiKitVersion, ConvertTo-GuiArg, ConvertTo-GuiArgString, Get-GuiProp, ConvertTo-GuiItems, Read-GuiJson, `
     Register-GuiHook, Get-GuiHook, Get-GuiCatalog, Get-GuiModes, Get-GuiAskDefaults, New-GuiSession, Initialize-GuiRunRoot, `
     Expand-GuiTokens, Test-GuiCondition, Test-GuiConditions, Expand-GuiArgs, `
-    Get-GuiNextAction, Get-GuiAsk, Set-GuiAnswer, Update-GuiCapture, Complete-GuiAction, Get-GuiFinalStatus, Get-GuiResultItems, `
+    Get-GuiNextAction, Get-GuiAsk, Set-GuiAnswer, Update-GuiCapture, Complete-GuiAction, Complete-GuiLaunchFailure, Get-GuiFinalStatus, Get-GuiResultItems, `
     Set-GuiConsoleEncoding, Restore-GuiConsoleEncoding, `
     Start-GuiChild, Update-GuiChild, Send-GuiAnswer, Stop-GuiChild, `
-    Get-GuiPromptTable, Get-GuiPendingPrompt, Set-GuiPromptDismissed, Resolve-GuiPromptSend, Save-GuiSession
+    Get-GuiPromptTable, Get-GuiPendingPrompt, Resolve-GuiPromptSend, Save-GuiSession
