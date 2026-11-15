@@ -1,0 +1,90 @@
+{
+  "SchemaVersion": 1,
+  "Note": "The single list of steps the window can run. It only NAMES the tool's own scripts and their arguments, in order. Never put the tool's logic here or in the window. Schema: .claude/skills/script-gui/references/catalog.md in the rinv-ai repo.",
+  "Tool": {
+    "Title": "__TOOL_TITLE__",
+    "RequireAdmin": false,
+    "RunRootBase": "%TEMP%\\__TOOL_ID__-runs",
+    "VersionFile": "",
+    "Footer": "",
+    "DoneText": "Finished.",
+    "LockedText": "A change is in progress. Closing now can leave this PC half changed. Wait for this step to finish."
+  },
+  "Modes": {
+    "Check": {
+      "Phase": "CHECK", "RunRoot": "new",
+      "Label": "Check only - nothing is changed",
+      "Description": "Runs the read-only check and writes the report."
+    },
+    "Full": {
+      "Phase": "FULL", "RunRoot": "new",
+      "Label": "Check and change",
+      "Description": "Runs the check, asks what to do, makes the change after you confirm, then writes the report."
+    }
+  },
+  "Asks": {
+    "Options": {
+      "Title": "Options for the change",
+      "Message": "Choose how the change should run. Nothing is changed until you confirm in the next box.",
+      "Checks": [
+        { "Key": "Thorough", "Text": "Thorough mode (slower)", "Checked": false },
+        { "Key": "KeepBackup", "Text": "Keep a backup copy", "Checked": true }
+      ],
+      "Input": { "Key": "Note", "Label": "Note for the report (optional)", "Default": "" },
+      "Sets": "DoChange", "Default": false,
+      "AcceptText": "Continue", "RefuseText": "Skip the change"
+    }
+  },
+  "Prompts": [
+    {
+      "Id": "ApplyConfirm",
+      "Needles": ["Apply the change? [y/N]"],
+      "Scripts": ["gui\\demo\\Demo-Tool.ps1"],
+      "Title": "Confirm the change",
+      "Message": "The demo change will be applied to the run folder.\r\n\r\nType APPLY to confirm.",
+      "DetailLines": 6,
+      "TypeWord": "APPLY",
+      "Buttons": [
+        { "Text": "Apply", "Send": "y", "NeedsWord": true },
+        { "Text": "Do not apply", "Send": "n" }
+      ],
+      "Refuse": "n",
+      "Lock": true
+    }
+  ],
+  "Steps": [
+    {
+      "Id": "1", "Title": "Check", "Phases": ["CHECK", "FULL"],
+      "Calls": [
+        { "Script": "gui\\demo\\Demo-Tool.ps1", "Args": ["-Action", "Check", "-OutDir", "{RunRoot}"],
+          "OnNonZero": "Stop", "StopMessage": "The check failed. Nothing else will run.",
+          "RequireOutput": "{RunRoot}\\check.json" }
+      ]
+    },
+    {
+      "Id": "2", "Title": "Change", "Destructive": true, "Phases": ["FULL"],
+      "Calls": [
+        { "Script": "gui\\demo\\Demo-Tool.ps1",
+          "Args": ["-Action", "Change", "-OutDir", "{RunRoot}",
+                   { "When": ["Answer:Thorough"], "Args": ["-Thorough"] },
+                   { "When": ["Answer:Note"], "Args": ["-Note", "{Answer:Note}"] }],
+          "Ask": "Options", "When": ["Answer:DoChange"], "SkipText": "Skipped by the operator.",
+          "OnNonZero": "Warn", "NonZeroText": "The change did not finish cleanly.",
+          "ExitCodes": { "3": { "Status": "Done", "Message": "Not applied - you declined.", "Counts": false } } }
+      ]
+    },
+    {
+      "Id": "3", "Title": "Report", "Phases": ["CHECK", "FULL"],
+      "Calls": [
+        { "Script": "gui\\demo\\Demo-Tool.ps1", "Args": ["-Action", "Report", "-OutDir", "{RunRoot}"],
+          "OnNonZero": "Warn", "Retry": true,
+          "SetVar": { "Report": "{RunRoot}\\report.txt" },
+          "Capture": [ { "Var": "Summary", "Pattern": "^SUMMARY: (.+)$" } ] }
+      ]
+    }
+  ],
+  "Results": [
+    { "Label": "Report", "Path": "{RunRoot}\\report.txt" },
+    { "Label": "Summary", "Var": "Summary" }
+  ]
+}
